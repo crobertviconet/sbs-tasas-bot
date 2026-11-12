@@ -25,45 +25,31 @@ def guardar_estado(estado):
         json.dump(estado, f, indent=2)
 
 
-def obtener_contexto_contenido(page):
-    if "Promedio de Mercado Efectiva" in page.content():
-        return page
-    for frame in page.frames:
-        try:
-            if "Promedio de Mercado Efectiva" in frame.content():
-                return frame
-        except Exception:
-            continue
-    return page
-
-
 def resaltar_y_extraer(page, es_activa=True):
-    page.wait_for_timeout(2000)
-    target = obtener_contexto_contenido(page)
-    html = target.content()
+    page.wait_for_timeout(1500)
+    html = page.content()
 
     match_fecha = re.search(r"Promedio de Mercado Efectiva al\s+(\d{2}/\d{2}/\d{4})", html)
     if not match_fecha:
-        titulo = page.title()
-        texto_muestra = re.sub(r"\s+", " ", target.inner_text("body"))[:250]
-        print(f"  [DEBUG] No se halló tabla. Título: '{titulo}' | Texto visible: '{texto_muestra}'")
         return None, None
 
     fecha_publicada = match_fecha.group(1)
-    etiqueta = "TAMN" if es_activa else "TIPMN"
+    etiqueta = "(TAMN)" if es_activa else "(TIPMN)"
 
-    valor_tasa = target.evaluate(f"""() => {{
+    # Busca la fila exacta que contiene "(TAMN)" o "(TIPMN)" sin confundir con "(TAMN + 1)" o "(FTAMN)"
+    valor_tasa = page.evaluate(f"""() => {{
         const rows = Array.from(document.querySelectorAll('tr'));
         for (const row of rows) {{
-            if (row.innerText.includes('Moneda Nacional') && row.innerText.includes('{etiqueta}')) {{
+            const text = row.innerText.replace(/\\s+/g, ' ').trim();
+            if (text.includes('{etiqueta}')) {{
                 const cells = Array.from(row.querySelectorAll('td'));
                 for (const cell of cells) {{
-                    const txt = cell.innerText.trim();
-                    if (txt.endsWith('%')) {{
+                    const cellTxt = cell.innerText.trim();
+                    if (/^\\d+(\\.\\d+)?%$/.test(cellTxt)) {{
                         cell.style.backgroundColor = '#a8e6cf';
                         cell.style.fontWeight = 'bold';
                         cell.style.border = '2px solid #2e7d32';
-                        return txt;
+                        return cellTxt;
                     }}
                 }}
             }}
@@ -79,13 +65,15 @@ def consultar_fecha_en_pagina(page, fecha_str=None):
     if not fecha_str:
         return
 
-    target = obtener_contexto_contenido(page)
-    input_fecha = target.locator("input:not([type='hidden']):not([type='submit']):not([type='button'])").first
+    # Input visible real del componente Telerik RadDatePicker de la SBS
+    input_fecha = page.locator("#ctl00_cphContent_rdpDate_dateInput")
     input_fecha.wait_for(state="visible", timeout=15000)
+    input_fecha.click()
     input_fecha.fill("")
-    input_fecha.fill(fecha_str)
+    input_fecha.type(fecha_str, delay=50)
+    input_fecha.press("Tab")
 
-    btn_consultar = target.locator("input[value*='Consultar'], button:has-text('Consultar')").first
+    btn_consultar = page.locator("#ctl00_cphContent_btnConsultar, input[value='Consultar']").first
     btn_consultar.click()
     page.wait_for_load_state("domcontentloaded")
     page.wait_for_timeout(2500)
@@ -183,7 +171,7 @@ def main():
             print(f"Consultando SBS (objetivo: {fecha_objetivo or 'Por defecto'})...")
             try:
                 page_activa.goto(URL_ACTIVA, wait_until="domcontentloaded", timeout=60000)
-                page_activa.wait_for_timeout(2500)
+                page_activa.wait_for_timeout(2000)
                 consultar_fecha_en_pagina(page_activa, fecha_objetivo)
                 fecha_act, tamn = resaltar_y_extraer(page_activa, es_activa=True)
             except Exception as e:
@@ -194,12 +182,12 @@ def main():
                 continue
 
             if fecha_act in fechas_enviadas:
-                print(f"  [INFO] La fecha {fecha_act} ya fue enviada anteriormente. No se envía correo.")
+                print(f"  [INFO] La fecha {fecha_act} ya fue enviada anteriormente.")
                 continue
 
             try:
                 page_pasiva.goto(URL_PASIVA, wait_until="domcontentloaded", timeout=60000)
-                page_pasiva.wait_for_timeout(2500)
+                page_pasiva.wait_for_timeout(2000)
                 consultar_fecha_en_pagina(page_pasiva, fecha_act)
                 fecha_pas, tipmn = resaltar_y_extraer(page_pasiva, es_activa=False)
             except Exception as e:
