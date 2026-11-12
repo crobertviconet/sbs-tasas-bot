@@ -1,0 +1,46 @@
+name: Monitor Tasas SBS
+
+on:
+  schedule:
+    # 5:00 PM a 6:30 PM Perú (22:00 a 23:30 UTC)
+    - cron: '0,30 22,23 * * *'
+    # 7:00 PM a 11:30 PM Perú (00:00 a 04:30 UTC)
+    - cron: '0,30 0,1,2,3,4 * * *'
+  workflow_dispatch: # Permite ejecutarlo manualmente cuando quieras probar
+
+permissions:
+  contents: write
+
+jobs:
+  verificar-sbs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias y Chromium
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Ejecutar validación de tasas SBS
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_CC: ${{ secrets.EMAIL_CC }}
+        run: python monitor_sbs.py
+
+      - name: Actualizar estado de fechas enviadas
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add estado.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: registrar fecha SBS enviada" && git push)
