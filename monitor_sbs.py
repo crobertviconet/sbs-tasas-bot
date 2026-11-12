@@ -9,8 +9,6 @@ from playwright.sync_api import sync_playwright
 URL_ACTIVA = "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaMercado.aspx?tip=B"
 URL_PASIVA = "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIPasivaMercado.aspx?tip=B"
 ESTADO_FILE = "estado.json"
-
-# Hora actual en Perú (UTC-5)
 TZ_PERU = timezone(timedelta(hours=-5))
 
 
@@ -22,30 +20,38 @@ def cargar_estado():
 
 
 def guardar_estado(estado):
-    # Mantener solo las últimas 30 fechas para que el archivo no crezca innecesariamente
     estado["fechas_enviadas"] = estado["fechas_enviadas"][-30:]
     with open(ESTADO_FILE, "w", encoding="utf-8") as f:
         json.dump(estado, f, indent=2)
 
 
-def resaltar_y_extraer(page, es_activa=True):
-    """
-    Extrae la fecha real del título de la tabla, obtiene el valor de TAMN o TIPMN,
-    y resalta la celda en verde claro antes de tomar la captura de pantalla.
-    """
-    page.wait_for_timeout(1500)
-    html = page.content()
+def obtener_contexto_contenido(page):
+    """Detecta si el contenido de la SBS está en la página principal o dentro de un iframe."""
+    if "Promedio de Mercado Efectiva" in page.content():
+        return page
+    for frame in page.frames:
+        try:
+            if "Promedio de Mercado Efectiva" in frame.content():
+                return frame
+        except Exception:
+            continue
+    return page
 
-    # Verificar la fecha real mostrada en el encabezado de la tabla: "... al DD/MM/AAAA"
+
+def resaltar_y_extraer(page, es_activa=True):
+    page.wait_for_timeout(2000)
+    target = obtener_contexto_contenido(page)
+    html = target.content()
+
     match_fecha = re.search(r"Promedio de Mercado Efectiva al\s+(\d{2}/\d{2}/\d{4})", html)
     if not match_fecha:
+        print("No se encontró la fecha en el HTML cargado.")
         return None, None
 
     fecha_publicada = match_fecha.group(1)
     etiqueta = "TAMN" if es_activa else "TIPMN"
 
-    # Buscar la fila que contiene Moneda Nacional (TAMN) o (TIPMN) y resaltar su tasa
-    valor_tasa = page.evaluate(f"""() => {{
+    valor_tasa = target.evaluate(f"""() => {{
         const rows = Array.from(document.querySelectorAll('tr'));
         for (const row of rows) {{
             if (row.innerText.includes('Moneda Nacional') && row.innerText.includes('{etiqueta}')) {{
@@ -68,14 +74,20 @@ def resaltar_y_extraer(page, es_activa=True):
 
 
 def consultar_fecha_en_pagina(page, fecha_str=None):
-    """Si se pasa fecha_str (DD/MM/YYYY), la ingresa en el formulario y presiona Consultar."""
-    if fecha_str:
-        input_fecha = page.locator("input[type='text']").first
-        input_fecha.fill("")
-        input_fecha.fill(fecha_str)
-        page.locator("input[value='Consultar'], button:has-text('Consultar')").first.click()
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(1500)
+    if not fecha_str:
+        return
+
+    target = obtener_contexto_contenido(page)
+    # Buscar cualquier input visible (text, date o sin atributo type explícito) junto a "Ingrese fecha"
+    input_fecha = target.locator("input:not([type='hidden']):not([type='submit']):not([type='button'])").first
+    input_fecha.wait_for(state="visible", timeout=15000)
+    input_fecha.fill("")
+    input_fecha.fill(fecha_str)
+
+    btn_consultar = target.locator("input[value*='Consultar'], button:has-text('Consultar')").first
+    btn_consultar.click()
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_timeout(2500)
 
 
 def enviar_correo(fecha_str, tamn, tipmn, img_activa_path, img_pasiva_path):
@@ -145,14 +157,18 @@ def main():
     fechas_enviadas = set(estado.get("fechas_enviadas", []))
 
     hoy_peru = datetime.now(TZ_PERU).date()
-    # Revisar primero la carga por defecto (None) y luego hoy hasta +4 días (fines de semana / feriados)
     fechas_a_probar = [None] + [
         (hoy_peru + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(0, 5)
     ]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        # Simular navegador real para evitar bloqueos del portal ASP.NET de la SBS
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            locale="es-PE"
+        )
         page_activa = context.new_page()
         page_pasiva = context.new_page()
 
@@ -161,17 +177,26 @@ def main():
                 continue
 
             print(f"Consultando SBS (objetivo: {fecha_objetivo or 'Por defecto'})...")
-            page_activa.goto(URL_ACTIVA, wait_until="networkidle", timeout=60000)
-            consultar_fecha_en_pagina(page_activa, fecha_objetivo)
-            fecha_act, tamn = resaltar_y_extraer(page_activa, es_activa=True)
+            try:
+                page_activa.goto(URL_ACTIVA, wait_until="domcontentloaded", timeout=60000)
+                page_activa.wait_for_timeout(2500)
+                consultar_fecha_en_pagina(page_activa, fecha_objetivo)
+                fecha_act, tamn = resaltar_y_extraer(page_activa, es_activa=True)
+            except Exception as e:
+                print(f"Aviso al consultar activa ({fecha_objetivo}): {e}")
+                continue
 
             if not fecha_act or not tamn or fecha_act in fechas_enviadas:
                 continue
 
-            # Verificar que la tasa pasiva también esté publicada para esa misma fecha
-            page_pasiva.goto(URL_PASIVA, wait_until="networkidle", timeout=60000)
-            consultar_fecha_en_pagina(page_pasiva, fecha_act)
-            fecha_pas, tipmn = resaltar_y_extraer(page_pasiva, es_activa=False)
+            try:
+                page_pasiva.goto(URL_PASIVA, wait_until="domcontentloaded", timeout=60000)
+                page_pasiva.wait_for_timeout(2500)
+                consultar_fecha_en_pagina(page_pasiva, fecha_act)
+                fecha_pas, tipmn = resaltar_y_extraer(page_pasiva, es_activa=False)
+            except Exception as e:
+                print(f"Aviso al consultar pasiva ({fecha_act}): {e}")
+                continue
 
             if fecha_pas == fecha_act and tipmn:
                 img_act = "/tmp/activa.png"
