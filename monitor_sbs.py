@@ -26,7 +26,6 @@ def guardar_estado(estado):
 
 
 def obtener_contexto_contenido(page):
-    """Detecta si el contenido de la SBS está en la página principal o dentro de un iframe."""
     if "Promedio de Mercado Efectiva" in page.content():
         return page
     for frame in page.frames:
@@ -45,7 +44,9 @@ def resaltar_y_extraer(page, es_activa=True):
 
     match_fecha = re.search(r"Promedio de Mercado Efectiva al\s+(\d{2}/\d{2}/\d{4})", html)
     if not match_fecha:
-        print("No se encontró la fecha en el HTML cargado.")
+        titulo = page.title()
+        texto_muestra = re.sub(r"\s+", " ", target.inner_text("body"))[:250]
+        print(f"  [DEBUG] No se halló tabla. Título: '{titulo}' | Texto visible: '{texto_muestra}'")
         return None, None
 
     fecha_publicada = match_fecha.group(1)
@@ -70,6 +71,7 @@ def resaltar_y_extraer(page, es_activa=True):
         return null;
     }}""")
 
+    print(f"  [DEBUG] Fecha en pantalla: {fecha_publicada} | {etiqueta}: {valor_tasa}")
     return fecha_publicada, valor_tasa
 
 
@@ -78,7 +80,6 @@ def consultar_fecha_en_pagina(page, fecha_str=None):
         return
 
     target = obtener_contexto_contenido(page)
-    # Buscar cualquier input visible (text, date o sin atributo type explícito) junto a "Ingrese fecha"
     input_fecha = target.locator("input:not([type='hidden']):not([type='submit']):not([type='button'])").first
     input_fecha.wait_for(state="visible", timeout=15000)
     input_fecha.fill("")
@@ -95,6 +96,8 @@ def enviar_correo(fecha_str, tamn, tipmn, img_activa_path, img_pasiva_path):
     smtp_pass = os.environ["SMTP_PASS"]
     email_to = os.environ["EMAIL_TO"]
     email_cc = os.environ.get("EMAIL_CC", "")
+
+    print(f"  [EMAIL] Enviando reporte de {fecha_str} a {email_to} (CC: {email_cc})...")
 
     msg = EmailMessage()
     msg["Subject"] = f"Tasas SBS ({fecha_str}) - TAMN: {tamn} | TIPMN: {tipmn}"
@@ -149,12 +152,13 @@ def enviar_correo(fecha_str, tamn, tipmn, img_activa_path, img_pasiva_path):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(smtp_user, smtp_pass)
         smtp.send_message(msg)
-    print(f"[OK] Correo enviado para la fecha {fecha_str}")
+    print(f"  [OK] Correo enviado exitosamente para {fecha_str}")
 
 
 def main():
     estado = cargar_estado()
     fechas_enviadas = set(estado.get("fechas_enviadas", []))
+    print(f"Fechas ya registradas en estado.json: {sorted(list(fechas_enviadas))}")
 
     hoy_peru = datetime.now(TZ_PERU).date()
     fechas_a_probar = [None] + [
@@ -163,7 +167,6 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Simular navegador real para evitar bloqueos del portal ASP.NET de la SBS
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -174,6 +177,7 @@ def main():
 
         for fecha_objetivo in fechas_a_probar:
             if fecha_objetivo and fecha_objetivo in fechas_enviadas:
+                print(f"Saltando {fecha_objetivo} (ya enviada previamente).")
                 continue
 
             print(f"Consultando SBS (objetivo: {fecha_objetivo or 'Por defecto'})...")
@@ -183,10 +187,14 @@ def main():
                 consultar_fecha_en_pagina(page_activa, fecha_objetivo)
                 fecha_act, tamn = resaltar_y_extraer(page_activa, es_activa=True)
             except Exception as e:
-                print(f"Aviso al consultar activa ({fecha_objetivo}): {e}")
+                print(f"  [ERROR] Al consultar activa ({fecha_objetivo}): {e}")
                 continue
 
-            if not fecha_act or not tamn or fecha_act in fechas_enviadas:
+            if not fecha_act or not tamn:
+                continue
+
+            if fecha_act in fechas_enviadas:
+                print(f"  [INFO] La fecha {fecha_act} ya fue enviada anteriormente. No se envía correo.")
                 continue
 
             try:
@@ -195,7 +203,7 @@ def main():
                 consultar_fecha_en_pagina(page_pasiva, fecha_act)
                 fecha_pas, tipmn = resaltar_y_extraer(page_pasiva, es_activa=False)
             except Exception as e:
-                print(f"Aviso al consultar pasiva ({fecha_act}): {e}")
+                print(f"  [ERROR] Al consultar pasiva ({fecha_act}): {e}")
                 continue
 
             if fecha_pas == fecha_act and tipmn:
@@ -211,6 +219,8 @@ def main():
                     key=lambda d: datetime.strptime(d, "%d/%m/%Y")
                 )
                 guardar_estado(estado)
+            else:
+                print(f"  [INFO] Tasa pasiva aún no coincide con activa ({fecha_act} vs {fecha_pas}).")
 
         browser.close()
 
