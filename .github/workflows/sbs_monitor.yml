@@ -2,11 +2,9 @@ name: Monitor Tasas SBS
 
 on:
   schedule:
-    # 5:00 PM a 6:30 PM Perú (22:00 a 23:30 UTC)
     - cron: '0,30 22,23 * * *'
-    # 7:00 PM a 11:30 PM Perú (00:00 a 04:30 UTC)
     - cron: '0,30 0,1,2,3,4 * * *'
-  workflow_dispatch: # Permite ejecutarlo manualmente cuando quieras probar
+  workflow_dispatch:
 
 permissions:
   contents: write
