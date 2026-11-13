@@ -2,8 +2,8 @@ name: Monitor Tasas SBS
 
 on:
   schedule:
-    - cron: '0,30 22,23 * * *'
-    - cron: '0,30 0,1,2,3,4 * * *'
+    - cron: '12,42 22,23 * * *'
+    - cron: '12,42 0,1,2,3,4 * * *'
   workflow_dispatch:
 
 permissions:
